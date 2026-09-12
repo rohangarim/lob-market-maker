@@ -1,0 +1,13 @@
+build/
+build-*/
+cmake-build-*/
+*.o
+*.obj
+*.out
+.DS_Store
+config/config.local.json
+.env
+compile_commands.json
+*.dSYM/
+data/*.bin
+!data/.gitkeep

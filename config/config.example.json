@@ -1,0 +1,20 @@
+{
+  "symbol": "AAPL",
+  "provider": "finnhub",
+  "finnhub_api_key": "SET_VIA_config.local.json_OR_FINNHUB_API_KEY_ENV_VAR",
+  "finnhub_ws_url": "wss://ws.finnhub.io",
+  "risk": {
+    "max_position": 500,
+    "max_order_size": 100,
+    "max_notional": 100000.0,
+    "max_daily_loss": 2000.0,
+    "max_open_orders": 20
+  },
+  "strategy": {
+    "base_half_spread_bps": 5.0,
+    "quote_size": 10,
+    "inventory_skew_bps_per_unit": 0.5,
+    "max_inventory_for_skew": 200,
+    "volatility_spread_multiplier": 1.5
+  }
+}
