@@ -66,21 +66,34 @@ private:
     std::map<int64_t, Quantity> asks_;
 };
 
+// Generates a stream where the reference price sits on a fixed tick grid
+// and moves by at most one tick on a small fraction of events (as a real
+// mid-price does), rather than drifting continuously by a sub-tick amount
+// on every event. This matters for this benchmark specifically: with a
+// continuously-drifting reference, almost every event lands on a price
+// never seen before, so the book never reaches a steady-state working set
+// and the comparison would not reflect how either representation behaves
+// against a real, bounded L2 book (a small number of price levels updated
+// repeatedly in place).
 std::vector<MarketEvent> make_realistic_update_stream(size_t n, int levels_per_side = 20) {
     std::mt19937_64 rng(4242);
     std::uniform_real_distribution<double> unit(0.0, 1.0);
     std::uniform_int_distribution<Quantity> qty_dist(1, 500);
+    constexpr int64_t kTickTicks = 100;  // $0.01 in Price internal-tick units
+    int64_t mid_ticks = 100 * Price::kScale;  // reference: $100.00
     std::vector<MarketEvent> events;
     events.reserve(n);
-    double mid = 100.0;
     for (size_t i = 0; i < n; ++i) {
-        mid = std::max(1.0, mid + std::normal_distribution<double>(0.0, 0.005)(rng));
+        if (unit(rng) < 0.05) {
+            mid_ticks += (unit(rng) < 0.5 ? -1 : 1) * kTickTicks;
+        }
         Side side = unit(rng) < 0.5 ? Side::Buy : Side::Sell;
         int level = static_cast<int>(std::pow(unit(rng), 2.0) * levels_per_side);
-        double px = side == Side::Buy ? mid - 0.01 * (level + 1) : mid + 0.01 * (level + 1);
+        int64_t px_ticks = side == Side::Buy ? mid_ticks - kTickTicks * (level + 1)
+                                              : mid_ticks + kTickTicks * (level + 1);
         events.push_back(MarketEvent::make_quote(Timestamp(static_cast<int64_t>(i)),
                                                    static_cast<SequenceNumber>(i + 1), Symbol("AAPL"),
-                                                   side, Price::from_double(px), qty_dist(rng)));
+                                                   side, Price::from_ticks(px_ticks), qty_dist(rng)));
     }
     return events;
 }

@@ -22,10 +22,10 @@ static void BM_RingBuffer_PushPopSingleThreaded(benchmark::State& state) {
 BENCHMARK(BM_RingBuffer_PushPopSingleThreaded);
 
 static void BM_RingBuffer_CrossThreadThroughput(benchmark::State& state) {
+    const uint64_t kCount = static_cast<uint64_t>(state.range(0));
     for (auto _ : state) {
         state.PauseTiming();
         SpscRingBuffer<uint64_t, 1 << 16> rb;
-        const uint64_t kCount = static_cast<uint64_t>(state.range(0));
         state.ResumeTiming();
 
         std::thread producer([&] {
@@ -42,8 +42,8 @@ static void BM_RingBuffer_CrossThreadThroughput(benchmark::State& state) {
             }
         }
         producer.join();
-        state.SetItemsProcessed(static_cast<int64_t>(kCount));
     }
+    state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * kCount));
 }
 BENCHMARK(BM_RingBuffer_CrossThreadThroughput)->Arg(1 << 20)->Unit(benchmark::kMillisecond);
 

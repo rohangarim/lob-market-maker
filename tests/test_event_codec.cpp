@@ -1,12 +1,24 @@
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <unistd.h>
 
 #include "replay/event_codec.hpp"
 
 using namespace lob;
+
+namespace {
+// mkstemp-based temp file path, avoiding the deprecated/unsafe tmpnam().
+std::string unique_temp_path() {
+    std::string tmpl = "/tmp/lob_event_codec_test_XXXXXX";
+    int fd = mkstemp(tmpl.data());
+    if (fd != -1) close(fd);
+    return tmpl;
+}
+}  // namespace
 
 TEST(EventCodec, RoundTripSingleEventThroughStream) {
     MarketEvent original = MarketEvent::make_quote(Timestamp(123456789), 42, Symbol("AAPL"),
@@ -32,7 +44,7 @@ TEST(EventCodec, RoundTripFileWithMultipleEvents) {
                                                    Symbol("MSFT"), i % 2 == 0 ? Side::Buy : Side::Sell,
                                                    Price::from_double(300.0 + i * 0.01), i + 1));
     }
-    std::string path = std::tmpnam(nullptr);
+    std::string path = unique_temp_path();
     write_events_to_file(path, events);
     auto loaded = read_events_from_file(path);
     std::remove(path.c_str());
@@ -46,7 +58,7 @@ TEST(EventCodec, RoundTripFileWithMultipleEvents) {
 }
 
 TEST(EventCodec, RejectsFileWithoutMagicHeader) {
-    std::string path = std::tmpnam(nullptr);
+    std::string path = unique_temp_path();
     {
         std::ofstream ofs(path, std::ios::binary);
         ofs << "not a valid event log";
@@ -56,7 +68,7 @@ TEST(EventCodec, RejectsFileWithoutMagicHeader) {
 }
 
 TEST(EventCodec, TruncatedRecordAtEndOfFileIsIgnoredNotCrashed) {
-    std::string path = std::tmpnam(nullptr);
+    std::string path = unique_temp_path();
     {
         std::ofstream ofs(path, std::ios::binary);
         write_magic(ofs);

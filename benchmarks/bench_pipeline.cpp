@@ -12,29 +12,37 @@ using namespace lob;
 
 namespace {
 
+// Reference price lives on the fixed tick grid and moves by at most one
+// tick on a small fraction of steps (see synthetic_data_gen.cpp for the
+// full rationale) so the book reaches a bounded, realistic working set
+// instead of manufacturing a never-repeated price on almost every event.
 std::vector<MarketEvent> make_synthetic_stream(size_t n) {
     std::mt19937_64 rng(9001);
     std::uniform_real_distribution<double> unit(0.0, 1.0);
     std::uniform_int_distribution<Quantity> qty_dist(1, 500);
+    constexpr int64_t kTickTicks = 100;  // $0.01
+    int64_t mid_ticks = 190 * Price::kScale;
     std::vector<MarketEvent> events;
     events.reserve(n);
-    double mid = 190.0;
     for (size_t i = 0; i < n; ++i) {
-        mid = std::max(1.0, mid + std::normal_distribution<double>(0.0, 0.005)(rng));
+        if (unit(rng) < 0.10) {
+            mid_ticks += (unit(rng) < 0.5 ? -1 : 1) * kTickTicks;
+        }
         double roll = unit(rng);
-        Timestamp t(std::chrono::microseconds(static_cast<int64_t>(i) * 100));
+        Timestamp t{std::chrono::microseconds(static_cast<int64_t>(i) * 100)};
         SequenceNumber seq = static_cast<SequenceNumber>(i + 1);
         if (roll < 0.3) {
             Side side = unit(rng) < 0.5 ? Side::Buy : Side::Sell;
-            double px = side == Side::Buy ? mid - 0.01 : mid + 0.01;
+            int64_t px_ticks = side == Side::Buy ? mid_ticks - kTickTicks / 2 : mid_ticks + kTickTicks / 2;
             events.push_back(MarketEvent::make_trade(t, seq, Symbol("AAPL"), side,
-                                                       Price::from_double(px), qty_dist(rng)));
+                                                       Price::from_ticks(px_ticks), qty_dist(rng)));
         } else {
             Side side = unit(rng) < 0.5 ? Side::Buy : Side::Sell;
             int level = static_cast<int>(std::pow(unit(rng), 2.0) * 10);
-            double px = side == Side::Buy ? mid - 0.01 * (level + 1) : mid + 0.01 * (level + 1);
+            int64_t px_ticks = side == Side::Buy ? mid_ticks - kTickTicks * (level + 1)
+                                                  : mid_ticks + kTickTicks * (level + 1);
             events.push_back(MarketEvent::make_quote(t, seq, Symbol("AAPL"), side,
-                                                       Price::from_double(px), qty_dist(rng)));
+                                                       Price::from_ticks(px_ticks), qty_dist(rng)));
         }
     }
     return events;
@@ -48,7 +56,8 @@ static void BM_Pipeline_EndToEndThroughput(benchmark::State& state) {
         PipelineConfig cfg;
         Pipeline pipeline(Symbol("AAPL"), cfg);
         for (const auto& ev : events) pipeline.process(ev);
-        benchmark::DoNotOptimize(pipeline.portfolio().state().position);
+        Quantity final_position = pipeline.portfolio().state().position;
+        benchmark::DoNotOptimize(final_position);
     }
     state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * events.size()));
 }

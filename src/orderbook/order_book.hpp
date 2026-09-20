@@ -21,19 +21,22 @@ struct BookLevel {
 // kept sorted by price (bids descending, asks ascending), maintained with
 // std::lower_bound + insert/erase rather than a node-based std::map.
 //
-// This was a deliberate choice made after benchmarking both representations
-// (see benchmarks/bench_order_book.cpp and the README benchmark section):
-// real order books rarely carry more than a few dozen resting price levels
-// per side, and the operations this project performs most often -- read
-// best bid/ask, read top-N depth, iterate the whole side for imbalance --
-// are exactly the operations a flat sorted array is best at: they are
-// sequential scans over contiguous memory with no pointer chasing, so they
-// stay in L1 and vectorize well. std::map's O(log n) lookup only wins when
-// n is large and lookups dominate over full scans/iteration, which is not
-// this workload. The O(n) insert/erase cost of shifting a vector is paid
-// only on the (relatively rarer) new-price-level path, and n is small
-// enough that a memmove of a few dozen 16-byte elements is still faster in
-// practice than a heap allocation + red-black tree rebalance.
+// This was a deliberate choice made after actually benchmarking both
+// representations (see benchmarks/bench_order_book.cpp and the README
+// benchmark section for the numbers this produced on the development
+// machine). Measured against a bounded ~40-level book: applying a stream
+// of quote upserts/deletes was roughly a wash between the two (std::map
+// was measured ~7% faster than the flat vector on pure apply throughput --
+// an O(n) memmove on insert is not free even for small n). But reads --
+// best_bid()/best_ask() and top-N depth, which this project calls far more
+// often than it mutates the book (every event triggers several metric
+// reads; only book-changing events mutate it) -- were measured roughly 2x
+// faster with the flat vector, because they are sequential scans over
+// contiguous memory with no pointer chasing, staying in L1. Given this
+// project's operation mix is read-dominated, the flat vector wins on net
+// despite being slightly slower to mutate. This is a real, workload-
+// dependent tradeoff, not a universal one: a system that mutates the book
+// far more than it reads it could reasonably choose std::map instead.
 //
 // Threading: single-writer. Exactly one thread (the order-book/strategy
 // thread) may call apply(); readers (best_bid/best_ask/depth/snapshot) are

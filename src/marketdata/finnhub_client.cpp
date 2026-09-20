@@ -20,7 +20,7 @@ FinnhubClient::FinnhubClient(std::string api_key, std::string symbol, double syn
 FinnhubClient::~FinnhubClient() { stop(); }
 
 void FinnhubClient::start() {
-    std::string url = "wss://ws.finnhub.io?token=" + api_key_;
+    std::string url = "wss://ws.finnhub.io/?token=" + api_key_;
     ws_->setUrl(url);
 
     ws_->setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg) {
