@@ -55,7 +55,8 @@ rolling trade volume and trades/sec.
 **Strategy** (`src/strategy/market_maker.hpp`): quotes around mid with half-spread widened by short-term
 volatility; both quotes shift by `inventory_skew_bps_per_unit * clamp(inventory) * mid` (long inventory
 lowers bid and ask); the inventory-extending side's size tapers to zero at the inventory limit; stops
-quoting on a one-sided book or stale data. Order-book imbalance is computed but **not currently used by
+quoting on a one-sided book. A stale-data guard exists in the strategy and risk engine, but in `Pipeline` it is
+effectively inert (see Limitations). Order-book imbalance is computed but **not currently used by
 the strategy**. It is a research toy, not an alpha model.
 
 **Execution simulator** (`src/execution/paper_execution_engine.hpp`): market orders sweep opposite depth;
@@ -125,6 +126,12 @@ not re-run the sanitizers after the last benchmark/generator edits. macOS ASan c
 
 - No real L2 data anywhere; live-mode book is a synthetic overlay; live trade handling is untested on real trades.
 - Not a queue-accurate exchange simulator.
+- **Stale-data guard is effectively inert in the pipeline.** `Pipeline::requote` passes the current event's
+  timestamp as "now" right after the book took that same timestamp, so measured staleness is always 0; the
+  guard is only exercised in unit tests that pass an explicit later `now`. Live mode has no wall-clock check.
+- Sequence gaps/duplicates/out-of-order events are counted, but the events are still applied to the book.
+- The ring buffer pads to 64 bytes (`hardware_destructive_interference_size` on this toolchain) but this Mac's
+  cache line is 128 bytes, so false-sharing protection is unverified here.
 - Fault-handling coverage is partial: sequence gaps/duplicates, empty book and stale-data quoting stop
   are tested; ring-buffer overflow, WebSocket reconnect, malformed-message and crossed-book behaviour
   have no dedicated tests (malformed/reconnect counters exist in the client).

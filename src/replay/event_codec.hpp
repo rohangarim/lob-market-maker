@@ -13,7 +13,7 @@ namespace lob {
 // Compact fixed-size binary event log format.
 //
 // File layout: an 8-byte magic/version header ("LOBEVT01") followed by a
-// sequence of fixed-size 42-byte records, one per MarketEvent. Fields are
+// sequence of fixed-size 50-byte records, one per MarketEvent. Fields are
 // serialized individually in little-endian byte order (this machine and
 // every realistic deployment target are little-endian; a portable
 // byte-swap could be added if that ever changes) rather than memcpy'ing the
