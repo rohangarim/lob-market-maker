@@ -43,4 +43,11 @@ Replay mode is single-threaded: `ReplayEngine` calls `Pipeline::process` directl
 - `SpscRingBuffer` indices: atomics (release/acquire); each thread's cached copy of the other side's index is thread-local.
 - `Pipeline` and everything it contains: single-owner, not thread-safe by design.
 - `FinnhubClient` counters (`messages_received`, `reconnect_count`, ...): atomics read from the main thread.
-- The Finnhub client's `last_trade_price_` / `last_side_` are only touched from the WebSocket thread.
+- The `TradeTapeAdapter` (tick-rule and synthetic-overlay state) is only touched from the WebSocket thread.
+
+## Feed-integrity handling
+
+Handled inside `Pipeline` (see README for the policy): duplicate/out-of-order events are dropped, sequence
+gaps and large event-time gaps cancel quotes and clear the book, a crossed book suppresses quoting, and the
+live loop calls `on_clock(now)` so a silent feed also cancels quotes. The live Finnhub path is
+`parse_finnhub_message` -> `TradeTapeAdapter` -> ring buffer; both are pure and unit-tested without a network.

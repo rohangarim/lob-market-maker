@@ -1,5 +1,6 @@
 set(LOB_CORE_SOURCES
     replay/event_codec.cpp
+    marketdata/finnhub_parser.cpp
     execution/paper_execution_engine.cpp
 )
 

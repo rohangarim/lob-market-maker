@@ -20,6 +20,11 @@ struct StrategyConfig {
     // Stop quoting if the book hasn't updated in this many seconds
     // (guards against quoting on stale/disconnected market data).
     double max_staleness_sec = 5.0;
+    // A resting quote is left in place unless the new target price differs by
+    // more than this many basis points of mid (or the size changed). Avoids
+    // canceling and replacing on every sub-tick wobble of the target. Applied
+    // by the Pipeline, which owns the resting orders. 0 disables hysteresis.
+    double requote_threshold_bps = 1.0;
 };
 
 struct QuoteDecision {

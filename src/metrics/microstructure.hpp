@@ -54,6 +54,13 @@ public:
         (void)ts;
     }
 
+    // Forget the price history (used after a feed resync so the jump across the
+    // gap is not counted as a volatility sample).
+    void reset_price_history() {
+        last_mid_.reset();
+        returns_.clear();
+    }
+
     void on_trade(Quantity qty, Timestamp ts) {
         trades_.push_back({qty, ts});
         while (trades_.size() > trade_window_) trades_.pop_front();

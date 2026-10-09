@@ -73,35 +73,75 @@ PipelineConfig build_pipeline_config(const json& cfg) {
         if (s.contains("quote_size")) pcfg.strategy.quote_size = s["quote_size"].get<Quantity>();
         if (s.contains("inventory_skew_bps_per_unit")) pcfg.strategy.inventory_skew_bps_per_unit = s["inventory_skew_bps_per_unit"].get<double>();
         if (s.contains("max_inventory_for_skew")) pcfg.strategy.max_inventory_for_skew = s["max_inventory_for_skew"].get<Quantity>();
+        if (s.contains("requote_threshold_bps")) pcfg.strategy.requote_threshold_bps = s["requote_threshold_bps"].get<double>();
         if (s.contains("volatility_spread_multiplier")) pcfg.strategy.volatility_spread_multiplier = s["volatility_spread_multiplier"].get<double>();
     }
     return pcfg;
 }
 
-void print_report(const Pipeline& pipeline, const char* mode_label) {
+void print_latency(const char* label, const LatencyStats& lat) {
+    if (lat.count() == 0) return;
+    std::cout << "  " << label << " (n=" << lat.count() << "): p50 " << lat.percentile(50) / 1000.0
+              << " us, p95 " << lat.percentile(95) / 1000.0 << " us, p99 "
+              << lat.percentile(99) / 1000.0 << " us, max " << lat.max_ns() / 1000.0 << " us\n";
+}
+
+json latency_json(const LatencyStats& lat) {
+    return {{"samples", lat.count()},
+            {"p50_us", lat.percentile(50) / 1000.0},
+            {"p95_us", lat.percentile(95) / 1000.0},
+            {"p99_us", lat.percentile(99) / 1000.0},
+            {"max_us", lat.max_ns() / 1000.0}};
+}
+
+json report_json(const Pipeline& pipeline, const char* mode_label, size_t ring_dropped) {
+    const auto& st = pipeline.stats();
+    const auto& pnl = pipeline.portfolio().state();
+    return {{"mode", mode_label},
+            {"events_processed", st.events_processed},
+            {"events_dropped_ring_overflow", ring_dropped},
+            {"out_of_order_dropped", st.out_of_order_dropped},
+            {"sequence_gaps", st.sequence_gaps},
+            {"stale_resets", st.stale_resets},
+            {"clock_stale_events", st.clock_stale_events},
+            {"crossed_book_events", st.crossed_book_events},
+            {"orders_submitted", pipeline.execution().total_submitted()},
+            {"orders_canceled", pipeline.execution().total_canceled()},
+            {"fills", st.fills},
+            {"partial_fills", st.partial_fills},
+            {"risk_rejects", st.risk_rejects},
+            {"position", pnl.position},
+            {"realized_pnl", pnl.realized_pnl},
+            {"unrealized_pnl", pnl.unrealized_pnl},
+            {"total_pnl", pnl.total_pnl},
+            {"decision_latency", latency_json(st.decision_latency)},
+            {"book_update_latency", latency_json(st.book_update_latency)},
+            {"execution_latency", latency_json(st.execution_latency)}};
+}
+
+void print_report(const Pipeline& pipeline, const char* mode_label, size_t ring_dropped = 0) {
     const auto& stats = pipeline.stats();
     const auto& pnl = pipeline.portfolio().state();
     const auto& exec = pipeline.execution();
 
     std::cout << "\n=== " << mode_label << " run report ===\n";
     std::cout << "events processed:     " << stats.events_processed << "\n";
+    std::cout << "ring-buffer drops:    " << ring_dropped << "\n";
+    std::cout << "out-of-order dropped: " << stats.out_of_order_dropped << "\n";
     std::cout << "sequence gaps:        " << stats.sequence_gaps << "\n";
-    std::cout << "quotes submitted:     " << stats.quotes_submitted << "\n";
-    std::cout << "quotes canceled:      " << stats.quotes_canceled << "\n";
+    std::cout << "stale resets:         " << stats.stale_resets << " (+" << stats.clock_stale_events
+              << " wall-clock stale)\n";
+    std::cout << "crossed-book events:  " << stats.crossed_book_events << "\n";
+    std::cout << "orders submitted:     " << exec.total_submitted() << "\n";
+    std::cout << "orders canceled:      " << exec.total_canceled() << "\n";
     std::cout << "fills:                " << stats.fills << " (partial: " << stats.partial_fills << ")\n";
     std::cout << "risk rejects:         " << stats.risk_rejects << "\n";
     std::cout << "open orders:          " << exec.open_order_count() << "\n";
-    std::cout << "-- decision latency (signal -> strategy -> risk -> order) --\n";
-    if (stats.decision_latency.count() > 0) {
-        std::cout << "  samples: " << stats.decision_latency.count() << "\n";
-        std::cout << "  p50: " << stats.decision_latency.percentile(50) / 1000.0 << " us\n";
-        std::cout << "  p95: " << stats.decision_latency.percentile(95) / 1000.0 << " us\n";
-        std::cout << "  p99: " << stats.decision_latency.percentile(99) / 1000.0 << " us\n";
-        std::cout << "  max: " << stats.decision_latency.max_ns() / 1000.0 << " us\n";
-    } else {
-        std::cout << "  (no quoting decisions were made)\n";
-    }
-    std::cout << "-- position / P&L --\n";
+    std::cout << "-- latency (histogram buckets, lower bound) --\n";
+    print_latency("decision (strategy->risk->order)", stats.decision_latency);
+    print_latency("book update + microstructure", stats.book_update_latency);
+    print_latency("execution + mark-to-market", stats.execution_latency);
+    std::cout << "-- position / P&L (simulated) --\n";
     std::cout << "  position:        " << pnl.position << "\n";
     std::cout << "  avg entry price: " << pnl.avg_entry_price << "\n";
     std::cout << "  realized P&L:    " << pnl.realized_pnl << "\n";
@@ -109,6 +149,19 @@ void print_report(const Pipeline& pipeline, const char* mode_label) {
     std::cout << "  total P&L:       " << pnl.total_pnl << "\n";
     std::cout << "  volume traded:   " << pnl.total_volume_traded << "\n";
     std::cout << "  turnover ($):    " << pnl.turnover << "\n";
+}
+
+PipelineConfig make_config(const CliArgs& args, const json& cfg) {
+    PipelineConfig pcfg = build_pipeline_config(cfg);
+    pcfg.profile_stages = args.has("profile-stages");
+    return pcfg;
+}
+
+void maybe_write_json(const CliArgs& args, const json& report) {
+    if (auto path = args.get("report-json")) {
+        std::ofstream(*path) << report.dump(2) << "\n";
+        std::cout << "JSON report written to " << *path << "\n";
+    }
 }
 
 int run_replay(const CliArgs& args, const json& cfg, const std::string& symbol) {
@@ -124,13 +177,14 @@ int run_replay(const CliArgs& args, const json& cfg, const std::string& symbol) 
     std::cout << "Loaded " << events.size() << " events. Replaying at speed="
               << (speed <= 0.0 ? "max" : std::to_string(speed) + "x") << "...\n";
 
-    ReplayEngine engine(Symbol(symbol), build_pipeline_config(cfg));
+    ReplayEngine engine(Symbol(symbol), make_config(args, cfg));
     ReplaySummary summary = engine.run(events, speed);
 
     std::cout << "\nReplay complete: " << summary.events_replayed << " events in "
               << (summary.wall_clock_duration.count() / 1e6) << " ms ("
               << (summary.events_per_second / 1e6) << " million events/sec)\n";
     print_report(engine.pipeline(), "REPLAY");
+    maybe_write_json(args, report_json(engine.pipeline(), "replay", 0));
     return 0;
 }
 
@@ -147,7 +201,7 @@ int run_live(const CliArgs& args, const json& cfg, const std::string& symbol) {
     long duration_sec = args.get_long_or("duration-sec", 60);
     double synthetic_spread = args.get_double_or("synthetic-spread", 0.02);
 
-    Pipeline pipeline(Symbol(symbol), build_pipeline_config(cfg));
+    Pipeline pipeline(Symbol(symbol), make_config(args, cfg));
 
     // Bounded SPSC ring buffer between the WebSocket I/O thread (producer,
     // driven by IXWebSocket's own callback thread) and this consumer loop
@@ -173,6 +227,7 @@ int run_live(const CliArgs& args, const json& cfg, const std::string& symbol) {
         while (auto ev = ring.pop()) {
             pipeline.process(*ev);
         }
+        pipeline.on_clock(now_ns());
         if (std::chrono::steady_clock::now() - last_report > std::chrono::seconds(2)) {
             std::cout << "\r  connected=" << client.connected()
                       << " msgs=" << client.messages_received()
@@ -189,7 +244,8 @@ int run_live(const CliArgs& args, const json& cfg, const std::string& symbol) {
     client.stop();
     while (auto ev = ring.pop()) pipeline.process(*ev);  // drain remaining
 
-    print_report(pipeline, "LIVE");
+    print_report(pipeline, "LIVE", dropped.load());
+    maybe_write_json(args, report_json(pipeline, "live", dropped.load()));
     return 0;
 #else
     (void)args; (void)cfg; (void)symbol;

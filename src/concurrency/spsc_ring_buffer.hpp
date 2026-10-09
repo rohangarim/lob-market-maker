@@ -133,7 +133,11 @@ public:
 private:
     static constexpr size_t kMask = Capacity - 1;
 
-#ifdef __cpp_lib_hardware_interference_size
+    // Apple Silicon has 128-byte cache lines (sysctl hw.cachelinesize) but the
+    // standard library still reports 64 there, so pad to 128 on that target.
+#if defined(__APPLE__) && defined(__aarch64__)
+    static constexpr size_t kCacheLine = 128;
+#elif defined(__cpp_lib_hardware_interference_size)
     static constexpr size_t kCacheLine = std::hardware_destructive_interference_size;
 #else
     static constexpr size_t kCacheLine = 64;

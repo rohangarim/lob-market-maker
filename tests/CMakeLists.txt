@@ -13,6 +13,11 @@ add_executable(lob_tests
     test_integration_pipeline.cpp
     test_random_order_book.cpp
     test_replay_determinism.cpp
+    test_pipeline_faults.cpp
+    test_finnhub_parser.cpp
+    test_trade_tape_adapter.cpp
+    test_latency_stats.cpp
+    test_synthetic_book.cpp
 )
 
 target_link_libraries(lob_tests PRIVATE lob_core GTest::gtest GTest::gtest_main)

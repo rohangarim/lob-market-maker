@@ -76,3 +76,43 @@ TEST(SpscRingBuffer, ConcurrentProducerConsumerDeliversAllItemsInOrder) {
         ASSERT_EQ(consumed[static_cast<size_t>(i)], i) << "order violated at index " << i;
     }
 }
+
+TEST(SpscRingBuffer, OverflowBurstKeepsOldestAndRejectsTheRest) {
+    SpscRingBuffer<int, 8> rb;  // usable capacity 7
+    int accepted = 0, dropped = 0;
+    for (int i = 0; i < 1000; ++i) (rb.push(i) ? accepted : dropped)++;
+    EXPECT_EQ(accepted, 7);
+    EXPECT_EQ(dropped, 993);
+    for (int i = 0; i < 7; ++i) EXPECT_EQ(*rb.pop(), i) << "an unread slot was overwritten";
+    EXPECT_FALSE(rb.pop().has_value());
+    EXPECT_TRUE(rb.push(1000));  // space is reusable after draining
+}
+
+TEST(SpscRingBuffer, FastProducerSlowConsumerAccountsForEveryItem) {
+    constexpr int kAttempts = 200'000;
+    SpscRingBuffer<int, 64> rb;
+    std::atomic<bool> done{false};
+    int accepted = 0, dropped = 0;
+    std::vector<int> received;
+
+    std::thread producer([&] {
+        for (int i = 0; i < kAttempts; ++i) (rb.push(i) ? accepted : dropped)++;
+        done.store(true, std::memory_order_release);
+    });
+    std::thread consumer([&] {
+        while (true) {
+            if (auto v = rb.pop()) {
+                received.push_back(*v);
+                if (received.size() % 16 == 0) std::this_thread::yield();  // stay slower than the producer
+            } else if (done.load(std::memory_order_acquire) && rb.empty()) {
+                break;
+            }
+        }
+    });
+    producer.join();
+    consumer.join();
+
+    EXPECT_EQ(accepted + dropped, kAttempts);
+    EXPECT_EQ(static_cast<int>(received.size()), accepted);
+    for (size_t i = 1; i < received.size(); ++i) ASSERT_LT(received[i - 1], received[i]);
+}

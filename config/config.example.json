@@ -15,6 +15,7 @@
     "quote_size": 10,
     "inventory_skew_bps_per_unit": 0.5,
     "max_inventory_for_skew": 200,
-    "volatility_spread_multiplier": 1.5
+    "volatility_spread_multiplier": 1.5,
+    "requote_threshold_bps": 1.0
   }
 }

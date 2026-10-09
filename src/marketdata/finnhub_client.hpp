@@ -6,7 +6,10 @@
 #include <optional>
 #include <string>
 
+#include <vector>
+
 #include "marketdata/events.hpp"
+#include "marketdata/trade_tape_adapter.hpp"
 
 namespace ix {
 class WebSocket;
@@ -67,7 +70,6 @@ private:
 
     std::string api_key_;
     std::string symbol_;
-    double synthetic_spread_;
     EventCallback callback_;
 
     std::unique_ptr<ix::WebSocket> ws_;
@@ -76,10 +78,9 @@ private:
     std::atomic<size_t> reconnect_count_{0};
     std::atomic<size_t> messages_received_{0};
     std::atomic<size_t> malformed_messages_{0};
-    std::atomic<SequenceNumber> next_sequence_{1};
-
-    std::optional<double> last_trade_price_;
-    Side last_side_ = Side::Buy;
+    // Touched only from the WebSocket callback thread.
+    TradeTapeAdapter adapter_;
+    std::vector<MarketEvent> batch_;
 };
 
 }  // namespace lob

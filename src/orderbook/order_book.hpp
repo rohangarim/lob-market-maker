@@ -82,12 +82,17 @@ public:
                 last_trade_time_ = ev.timestamp;
                 break;
             case EventType::Snapshot:
-                bids_.clear();
-                asks_.clear();
+                clear();
                 break;
             case EventType::Heartbeat:
                 break;
         }
+    }
+
+    // Drops every resting level (used when the feed is known to be out of sync).
+    void clear() noexcept {
+        bids_.clear();
+        asks_.clear();
     }
 
     [[nodiscard]] std::optional<Price> best_bid() const noexcept {
