@@ -7,7 +7,10 @@
 // (src/common/pipeline.hpp); replay additionally supports deterministic,
 // speed-controlled playback via ReplayEngine.
 
+#include <algorithm>
 #include <atomic>
+#include <memory>
+#include <stdexcept>
 #include <csignal>
 #include <fstream>
 #include <iostream>
@@ -73,8 +76,27 @@ PipelineConfig build_pipeline_config(const json& cfg) {
         if (s.contains("quote_size")) pcfg.strategy.quote_size = s["quote_size"].get<Quantity>();
         if (s.contains("inventory_skew_bps_per_unit")) pcfg.strategy.inventory_skew_bps_per_unit = s["inventory_skew_bps_per_unit"].get<double>();
         if (s.contains("max_inventory_for_skew")) pcfg.strategy.max_inventory_for_skew = s["max_inventory_for_skew"].get<Quantity>();
+        if (s.contains("use_microprice")) pcfg.strategy.use_microprice = s["use_microprice"].get<bool>();
+        if (s.contains("imbalance_skew_bps")) pcfg.strategy.imbalance_skew_bps = s["imbalance_skew_bps"].get<double>();
+        if (s.contains("imbalance_levels")) pcfg.strategy.imbalance_levels = s["imbalance_levels"].get<int>();
         if (s.contains("requote_threshold_bps")) pcfg.strategy.requote_threshold_bps = s["requote_threshold_bps"].get<double>();
         if (s.contains("volatility_spread_multiplier")) pcfg.strategy.volatility_spread_multiplier = s["volatility_spread_multiplier"].get<double>();
+    }
+    if (cfg.contains("execution")) {
+        auto& e = cfg["execution"];
+        auto& f = pcfg.fill_assumptions;
+        if (e.contains("fill_model")) {
+            std::string m = e["fill_model"].get<std::string>();
+            if (m == "queue") f.fill_model = FillModel::QueuePosition;
+            else if (m == "trade_through") f.fill_model = FillModel::TradeThrough;
+            else throw std::runtime_error("unknown execution.fill_model '" + m + "' (expected 'queue' or 'trade_through')");
+        }
+        if (e.contains("order_latency_us")) f.order_latency = std::chrono::microseconds(e["order_latency_us"].get<int64_t>());
+        if (e.contains("cancel_latency_us")) f.cancel_latency = std::chrono::microseconds(e["cancel_latency_us"].get<int64_t>());
+        if (e.contains("maker_fee_per_share")) f.maker_fee_per_share = e["maker_fee_per_share"].get<double>();
+        if (e.contains("taker_fee_per_share")) f.taker_fee_per_share = e["taker_fee_per_share"].get<double>();
+        if (e.contains("partial_fill_probability")) f.partial_fill_probability = e["partial_fill_probability"].get<double>();
+        if (e.contains("rng_seed")) f.rng_seed = e["rng_seed"].get<uint64_t>();
     }
     return pcfg;
 }
@@ -177,14 +199,27 @@ int run_replay(const CliArgs& args, const json& cfg, const std::string& symbol) 
     std::cout << "Loaded " << events.size() << " events. Replaying at speed="
               << (speed <= 0.0 ? "max" : std::to_string(speed) + "x") << "...\n";
 
-    ReplayEngine engine(Symbol(symbol), make_config(args, cfg));
-    ReplaySummary summary = engine.run(events, speed);
+    const long repeat = std::max(1L, args.get_long_or("repeat", 1));
+    std::vector<double> rates;
+    std::unique_ptr<ReplayEngine> engine;
+    ReplaySummary summary;
+    for (long r = 0; r < repeat; ++r) {
+        engine = std::make_unique<ReplayEngine>(Symbol(symbol), make_config(args, cfg));
+        summary = engine->run(events, speed);
+        rates.push_back(summary.events_per_second / 1e6);
+        if (repeat > 1) std::cout << "  run " << (r + 1) << ": " << rates.back() << " M events/sec\n";
+    }
 
     std::cout << "\nReplay complete: " << summary.events_replayed << " events in "
               << (summary.wall_clock_duration.count() / 1e6) << " ms ("
               << (summary.events_per_second / 1e6) << " million events/sec)\n";
-    print_report(engine.pipeline(), "REPLAY");
-    maybe_write_json(args, report_json(engine.pipeline(), "replay", 0));
+    if (repeat > 1) {
+        std::sort(rates.begin(), rates.end());
+        std::cout << "Across " << repeat << " runs (M events/sec): min " << rates.front() << ", median "
+                  << rates[rates.size() / 2] << ", max " << rates.back() << "\n";
+    }
+    print_report(engine->pipeline(), "REPLAY");
+    maybe_write_json(args, report_json(engine->pipeline(), "replay", 0));
     return 0;
 }
 

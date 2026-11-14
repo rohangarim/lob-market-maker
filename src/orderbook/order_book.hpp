@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include "common/types.hpp"
@@ -135,14 +136,25 @@ public:
         return bb && ba && bb->ticks() >= ba->ticks();
     }
 
-    [[nodiscard]] std::vector<BookLevel> bid_depth(size_t levels) const {
-        size_t n = std::min(levels, bids_.size());
-        return std::vector<BookLevel>(bids_.begin(), bids_.begin() + static_cast<long>(n));
+    // Zero-allocation views of the top `levels` levels (best first). The span
+    // aliases the book's storage: it is invalidated by the next apply()/clear(),
+    // so consume it before mutating the book.
+    [[nodiscard]] std::span<const BookLevel> bid_depth(size_t levels) const noexcept {
+        return {bids_.data(), std::min(levels, bids_.size())};
     }
 
-    [[nodiscard]] std::vector<BookLevel> ask_depth(size_t levels) const {
-        size_t n = std::min(levels, asks_.size());
-        return std::vector<BookLevel>(asks_.begin(), asks_.begin() + static_cast<long>(n));
+    [[nodiscard]] std::span<const BookLevel> ask_depth(size_t levels) const noexcept {
+        return {asks_.data(), std::min(levels, asks_.size())};
+    }
+
+    [[nodiscard]] std::span<const BookLevel> bids() const noexcept { return bids_; }
+    [[nodiscard]] std::span<const BookLevel> asks() const noexcept { return asks_; }
+
+    // Resting quantity at exactly (side, price); 0 if there is no such level.
+    [[nodiscard]] Quantity quantity_at(Side side, Price price) const noexcept {
+        const auto& levels = (side == Side::Buy) ? bids_ : asks_;
+        auto it = find_position(levels, side, price);
+        return (it != levels.end() && it->price == price) ? it->quantity : 0;
     }
 
     struct Snapshot {
@@ -190,16 +202,28 @@ private:
         }
     }
 
-    static std::vector<BookLevel>::iterator find_position(std::vector<BookLevel>& levels,
-                                                            Side side, Price price) {
-        if (side == Side::Buy) {
-            // descending order: first element with price <= target
-            return std::lower_bound(levels.begin(), levels.end(), price,
-                                     [](const BookLevel& lvl, Price p) { return lvl.price > p; });
-        }
-        // ascending order: first element with price >= target
-        return std::lower_bound(levels.begin(), levels.end(), price,
-                                 [](const BookLevel& lvl, Price p) { return lvl.price < p; });
+    using Levels = std::vector<BookLevel>;
+
+    // Explicit return types (not `auto`): clang 17 crashes in IR generation when
+    // a member function calls a deduced-return-type member template that is
+    // declared later in the class.
+    static Levels::iterator find_position(Levels& levels, Side side, Price price) {
+        return levels.begin() + (lower_bound_index(levels, side, price));
+    }
+
+    static Levels::const_iterator find_position(const Levels& levels, Side side, Price price) {
+        return levels.begin() + (lower_bound_index(levels, side, price));
+    }
+
+    static std::ptrdiff_t lower_bound_index(const Levels& levels, Side side, Price price) {
+        auto it = (side == Side::Buy)
+            // descending: first element with price <= target
+            ? std::lower_bound(levels.begin(), levels.end(), price,
+                               [](const BookLevel& lvl, Price p) { return lvl.price > p; })
+            // ascending: first element with price >= target
+            : std::lower_bound(levels.begin(), levels.end(), price,
+                               [](const BookLevel& lvl, Price p) { return lvl.price < p; });
+        return it - levels.begin();
     }
 
     Symbol symbol_;

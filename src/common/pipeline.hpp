@@ -2,9 +2,11 @@
 
 #include <chrono>
 #include <optional>
+#include <vector>
 
 #include "execution/paper_execution_engine.hpp"
 #include "metrics/latency_stats.hpp"
+#include "metrics/markout.hpp"
 #include "metrics/microstructure.hpp"
 #include "orderbook/order_book.hpp"
 #include "portfolio/portfolio.hpp"
@@ -20,6 +22,10 @@ struct PipelineConfig {
     // Opt-in: time the book-update and execution stages of every event. Costs
     // a few extra clock reads per event, so it is off by default.
     bool profile_stages = false;
+    // Event-time horizons at which fills are marked to the mid (adverse selection).
+    std::vector<Timestamp> markout_horizons = {
+        std::chrono::milliseconds(1), std::chrono::milliseconds(10),
+        std::chrono::milliseconds(100), std::chrono::seconds(1)};
 };
 
 struct PipelineStats {
@@ -71,7 +77,8 @@ public:
           stale_threshold_(std::chrono::duration_cast<Timestamp>(
               std::chrono::duration<double>(cfg.strategy.max_staleness_sec))),
           requote_threshold_bps_(cfg.strategy.requote_threshold_bps),
-          profile_stages_(cfg.profile_stages) {}
+          profile_stages_(cfg.profile_stages),
+          markout_(cfg.markout_horizons) {}
 
     void process(const MarketEvent& ev) {
         ++stats_.events_processed;
@@ -90,14 +97,18 @@ public:
         if (stale) ++stats_.stale_resets;
         if (gap || stale) resync(ev.timestamp);
 
+        if (last_mid_) markout_.on_time(ev.timestamp, *last_mid_);
+
         auto t0 = profile_stages_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         book_.apply(ev);
         micro_.on_book_update(book_, ev.timestamp);
         if (ev.type == EventType::Trade) micro_.on_trade(ev.quantity, ev.timestamp);
         auto t1 = profile_stages_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
+        last_mid_ = book_.mid_price();
         for (const auto& report : exec_.on_market_event(ev)) apply_report(report);
-        if (auto mid = book_.mid_price()) portfolio_.mark_to_market(*mid);
+        if (last_mid_) portfolio_.mark_to_market(*last_mid_);
+        analytics_.sample(portfolio_.state().position, portfolio_.state().total_pnl);
         if (profile_stages_) {
             auto t2 = std::chrono::steady_clock::now();
             stats_.book_update_latency.add_ns(
@@ -137,6 +148,8 @@ public:
     [[nodiscard]] const PaperExecutionEngine& execution() const noexcept { return exec_; }
     [[nodiscard]] const MicrostructureCalculator& microstructure() const noexcept { return micro_; }
     [[nodiscard]] bool market_data_stale() const noexcept { return market_data_stale_; }
+    [[nodiscard]] const MarkoutTracker& markout() const noexcept { return markout_; }
+    [[nodiscard]] const RunAnalytics& analytics() const noexcept { return analytics_; }
 
 private:
     struct RestingQuote {
@@ -147,7 +160,11 @@ private:
 
     void apply_report(const ExecutionReport& report) {
         if (report.fill_quantity > 0) {
-            portfolio_.on_fill(report.side, report.fill_price, report.fill_quantity);
+            portfolio_.on_fill(report.side, report.fill_price, report.fill_quantity, report.fee);
+            if (last_mid_) {
+                markout_.on_fill(report.side, report.fill_price.to_double(), report.fill_quantity,
+                                 *last_mid_, report.timestamp);
+            }
             ++stats_.fills;
             if (report.status == OrderStatus::PartiallyFilled) ++stats_.partial_fills;
         }
@@ -217,9 +234,10 @@ private:
             return;
         }
         OrderId id = next_order_id_++;
-        exec_.submit_limit(id, book_.symbol(), side, price, size, now);
-        slot = RestingQuote{id, price, size};
+        SubmitResult res = exec_.submit_limit(id, book_.symbol(), side, price, size, now, book_);
         ++stats_.quotes_submitted;
+        if (res.taker_fill) apply_report(*res.taker_fill);
+        if (exec_.get_order(id)) slot = RestingQuote{id, price, size};
     }
 
     OrderBook book_;
@@ -239,6 +257,9 @@ private:
     std::optional<RestingQuote> resting_bid_;
     std::optional<RestingQuote> resting_ask_;
     PipelineStats stats_;
+    MarkoutTracker markout_;
+    RunAnalytics analytics_;
+    std::optional<double> last_mid_;
 };
 
 }  // namespace lob

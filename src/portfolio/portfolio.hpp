@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <vector>
 
 #include "execution/order.hpp"
@@ -16,6 +17,7 @@ struct PositionState {
     double total_pnl = 0.0;
     Quantity total_volume_traded = 0;  // sum of |fill quantities|
     double turnover = 0.0;             // sum of |fill quantity * fill price|
+    double fees_paid = 0.0;            // negative = net rebate; already deducted from total_pnl
 };
 
 // ---------------------------------------------------------------------------
@@ -41,12 +43,13 @@ struct PositionState {
 // ---------------------------------------------------------------------------
 class Portfolio {
 public:
-    void on_fill(Side side, Price fill_price, Quantity fill_qty) {
+    void on_fill(Side side, Price fill_price, Quantity fill_qty, double fee = 0.0) {
         double price = fill_price.to_double();
         double qty = static_cast<double>(fill_qty);
         double signed_fill = (side == Side::Buy) ? qty : -qty;
 
         state_.total_volume_traded += fill_qty;
+        state_.fees_paid += fee;
         state_.turnover += qty * price;
 
         if (state_.position == 0 ||
@@ -73,15 +76,13 @@ public:
                 state_.avg_entry_price = 0.0;
             }
         }
+        refresh_totals();
         record_history();
     }
 
     void mark_to_market(double mark_price) {
-        // position is signed (+long/-short), so this single expression is
-        // correct for both: a short (negative position) profits when
-        // mark_price falls below avg_entry_price, which the sign handles.
-        state_.unrealized_pnl = static_cast<double>(state_.position) * (mark_price - state_.avg_entry_price);
-        state_.total_pnl = state_.realized_pnl + state_.unrealized_pnl;
+        last_mark_ = mark_price;
+        refresh_totals();
     }
 
     [[nodiscard]] const PositionState& state() const noexcept { return state_; }
@@ -89,11 +90,21 @@ public:
     [[nodiscard]] const std::vector<PositionState>& history() const noexcept { return history_; }
 
 private:
+    // position is signed (+long/-short), so one expression covers both: a short
+    // profits when the mark falls below avg_entry_price. Fees reduce total P&L.
+    void refresh_totals() {
+        if (last_mark_) {
+            state_.unrealized_pnl = static_cast<double>(state_.position) * (*last_mark_ - state_.avg_entry_price);
+        }
+        state_.total_pnl = state_.realized_pnl + state_.unrealized_pnl - state_.fees_paid;
+    }
+
     void record_history() {
         history_.push_back(state_);
     }
 
     PositionState state_;
+    std::optional<double> last_mark_;
     std::vector<PositionState> history_;
 };
 

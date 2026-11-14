@@ -25,6 +25,17 @@ struct StrategyConfig {
     // canceling and replacing on every sub-tick wobble of the target. Applied
     // by the Pipeline, which owns the resting orders. 0 disables hysteresis.
     double requote_threshold_bps = 1.0;
+    // Fair-value adjustments (both off by default, so behaviour is unchanged):
+    //   use_microprice: quote around the size-weighted microprice instead of mid.
+    //   imbalance_skew_bps: shift the reference by imbalance_skew_bps * OBI bps
+    //     of mid, where OBI is the bid/ask volume imbalance over the top
+    //     imbalance_levels levels (+1 = all bids). Positive values lean quotes
+    //     in the direction of the heavier side, which is where a persistent
+    //     imbalance has historically been argued to predict the next move.
+    //     Whether that holds is an empirical question for real data.
+    bool use_microprice = false;
+    double imbalance_skew_bps = 0.0;
+    int imbalance_levels = 3;
 };
 
 struct QuoteDecision {
@@ -87,6 +98,16 @@ public:
         }
 
         double mid = *mid_opt;
+        double ref = mid;
+        if (cfg_.use_microprice) {
+            if (auto mp = MicrostructureCalculator::microprice(book)) ref = *mp;
+        }
+        if (cfg_.imbalance_skew_bps != 0.0) {
+            if (auto oi = MicrostructureCalculator::depth_imbalance(
+                    book, static_cast<size_t>(std::max(1, cfg_.imbalance_levels)))) {
+                ref += (cfg_.imbalance_skew_bps / 10'000.0) * (*oi) * mid;
+            }
+        }
         double vol = micro.short_term_volatility().value_or(0.0);
         double normalized_vol = vol * 10'000.0;  // scale log-return stddev to a bps-like magnitude
         double half_spread_bps =
@@ -99,8 +120,8 @@ public:
         double inv_skew_dollars =
             (cfg_.inventory_skew_bps_per_unit / 10'000.0) * clamped_inventory * mid;
 
-        double bid = mid - half_spread_dollars - inv_skew_dollars;
-        double ask = mid + half_spread_dollars - inv_skew_dollars;
+        double bid = ref - half_spread_dollars - inv_skew_dollars;
+        double ask = ref + half_spread_dollars - inv_skew_dollars;
         if (bid <= 0.0 || ask <= bid) return decision;  // degenerate quotes, refuse to trade
 
         double inv_ratio = (cfg_.max_inventory_for_skew > 0)

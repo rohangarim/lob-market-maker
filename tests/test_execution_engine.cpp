@@ -61,6 +61,7 @@ TEST(PaperExecutionEngine, RestingLimitDoesNotFillWhenTradeDoesNotCross) {
 
 TEST(PaperExecutionEngine, PartialFillLeavesOrderOpenWithReducedRemaining) {
     FillAssumptions fa;
+    fa.fill_model = FillModel::TradeThrough;
     fa.partial_fill_probability = 1.0;  // force partial
     fa.min_partial_fill_ratio = 0.5;
     fa.max_partial_fill_ratio = 0.5;  // deterministic 50% partial
@@ -78,6 +79,7 @@ TEST(PaperExecutionEngine, PartialFillLeavesOrderOpenWithReducedRemaining) {
 
 TEST(PaperExecutionEngine, FillQuantityNeverExceedsTradeQuantity) {
     FillAssumptions fa;
+    fa.fill_model = FillModel::TradeThrough;
     fa.partial_fill_probability = 0.0;
     PaperExecutionEngine engine(fa);
     engine.submit_limit(1, Symbol("AAPL"), Side::Buy, Price::from_double(100.00), 50, Timestamp(1));
@@ -128,6 +130,7 @@ TEST(PaperExecutionEngine, MarketOrderRejectedWhenNoLiquidity) {
 
 TEST(PaperExecutionEngine, SameSeedProducesIdenticalFillSequence) {
     FillAssumptions fa;
+    fa.fill_model = FillModel::TradeThrough;
     fa.rng_seed = 777;
     auto run = [&]() {
         PaperExecutionEngine engine(fa);
