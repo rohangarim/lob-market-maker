@@ -16,6 +16,18 @@
     "inventory_skew_bps_per_unit": 0.5,
     "max_inventory_for_skew": 200,
     "volatility_spread_multiplier": 1.5,
-    "requote_threshold_bps": 1.0
+    "requote_threshold_bps": 1.0,
+    "tick_size": 0.01,
+    "post_only": true,
+    "use_microprice": false,
+    "imbalance_skew_bps": 0.0,
+    "imbalance_levels": 3
+  },
+  "execution": {
+    "fill_model": "queue",
+    "order_latency_us": 0,
+    "cancel_latency_us": 0,
+    "maker_fee_per_share": 0.0,
+    "taker_fee_per_share": 0.0
   }
 }

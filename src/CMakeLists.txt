@@ -7,6 +7,8 @@ set(LOB_CORE_SOURCES
 add_library(lob_core STATIC ${LOB_CORE_SOURCES})
 target_include_directories(lob_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(lob_core PUBLIC nlohmann_json::nlohmann_json)
+find_package(Threads REQUIRED)
+target_link_libraries(lob_core PUBLIC Threads::Threads)
 target_compile_features(lob_core PUBLIC cxx_std_20)
 
 if(BUILD_LIVE_FEED)
@@ -19,6 +21,9 @@ endif()
 
 add_executable(market_engine apps/market_engine.cpp)
 target_link_libraries(market_engine PRIVATE lob_core)
+
+add_executable(param_sweep tools/param_sweep.cpp)
+target_link_libraries(param_sweep PRIVATE lob_core)
 
 add_executable(generate_synthetic_data tools/synthetic_data_gen.cpp)
 target_link_libraries(generate_synthetic_data PRIVATE lob_core)

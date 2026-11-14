@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -142,6 +143,11 @@ public:
         }
     }
 
+    // Optional instrumentation: called for every fill with the mid that was in force
+    // when it happened. Unset by default (no cost on the hot path beyond a null check).
+    using FillObserver = std::function<void(const ExecutionReport&, std::optional<double> mid)>;
+    void set_fill_observer(FillObserver obs) { fill_observer_ = std::move(obs); }
+
     [[nodiscard]] const OrderBook& book() const noexcept { return book_; }
     [[nodiscard]] const Portfolio& portfolio() const noexcept { return portfolio_; }
     [[nodiscard]] const PipelineStats& stats() const noexcept { return stats_; }
@@ -161,6 +167,7 @@ private:
     void apply_report(const ExecutionReport& report) {
         if (report.fill_quantity > 0) {
             portfolio_.on_fill(report.side, report.fill_price, report.fill_quantity, report.fee);
+            if (fill_observer_) fill_observer_(report, last_mid_);
             if (last_mid_) {
                 markout_.on_fill(report.side, report.fill_price.to_double(), report.fill_quantity,
                                  *last_mid_, report.timestamp);
@@ -260,6 +267,7 @@ private:
     MarkoutTracker markout_;
     RunAnalytics analytics_;
     std::optional<double> last_mid_;
+    FillObserver fill_observer_;
 };
 
 }  // namespace lob

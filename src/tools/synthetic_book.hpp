@@ -35,7 +35,18 @@ namespace lob {
 //     direction of each reference move is biased by the top-3-level volume
 //     imbalance of the book at that moment, P(up) = 0.5 + 0.5 * strength * OBI.
 //     This exists ONLY so tests and sweeps can confirm that a strategy using
-//     imbalance is wired correctly; it says nothing about real markets.
+//     imbalance is wired correctly; it says nothing about real markets. Caveat found
+//     by measurement: the book's mid is only a noisy estimate of the hidden reference
+//     price, which makes top-3 imbalance correlate NEGATIVELY (about -0.2 at 10 ms)
+//     with the next mid change even at strength 0 (mean reversion of that noise), and
+//     that swamps the planted effect, so a sweep cannot show imbalance skew paying off.
+//   - Optional informed flow (informed_flow in [0,1], default 0): the direction of
+//     the next reference move is also biased toward the aggressor side of the most
+//     recent trade, P(up) = 0.5 + 0.5 * (strength*OBI + informed_flow*last_trade_sign).
+//     With informed_flow = 0 trades carry no information and any passive fill is
+//     free spread (positive markout at every horizon, which no real market gives a
+//     maker); with it set, fills are followed by moves against the maker, i.e.
+//     adverse selection exists, and latency and queue position start to matter.
 // Sequence numbers are consecutive; timestamps are non-decreasing.
 // ---------------------------------------------------------------------------
 class SyntheticBookGenerator {
@@ -44,12 +55,13 @@ public:
     static constexpr double kMoveProbability = 0.10;
 
     SyntheticBookGenerator(uint64_t seed, double start_price, double tick_size, Symbol symbol,
-                           double signal_strength = 0.0)
+                           double signal_strength = 0.0, double informed_flow = 0.0)
         : rng_(seed),
           ref_(Price::from_double(start_price).ticks()),
           tick_(Price::from_double(tick_size).ticks()),
           symbol_(symbol),
-          strength_(signal_strength) {}
+          strength_(signal_strength),
+          informed_(informed_flow) {}
 
     MarketEvent next() {
         t_ += std::chrono::microseconds(std::uniform_int_distribution<int>(50, 2000)(rng_));
@@ -57,7 +69,9 @@ public:
 
         if (pending_.empty() && unit() < kMoveProbability) {
             last_move_imbalance_ = imbalance();
-            bool up = unit() >= 0.5 - 0.5 * strength_ * last_move_imbalance_;
+            last_move_flow_ = flow_state_;
+            bool up = unit() >= 0.5 - 0.5 * (strength_ * last_move_imbalance_ + informed_ * flow_state_);
+            flow_state_ = 0.0;
             ref_ += (up ? 1 : -1) * tick_;
             last_move_up_ = up;
             ++moves_;
@@ -84,6 +98,8 @@ public:
     // Test hooks: the imbalance seen at the most recent reference move and its direction.
     [[nodiscard]] double last_move_imbalance() const noexcept { return last_move_imbalance_; }
     [[nodiscard]] bool last_move_up() const noexcept { return last_move_up_; }
+    // Sign (+1 buy / -1 sell / 0 none) of the most recent trade before the last move.
+    [[nodiscard]] double last_move_flow() const noexcept { return last_move_flow_; }
     [[nodiscard]] size_t moves() const noexcept { return moves_; }
 
     [[nodiscard]] size_t bid_levels() const noexcept { return bids_.size(); }
@@ -143,6 +159,7 @@ private:
             book_side.erase(swept[i]);
             pending_.emplace_back(buy_aggressor ? Side::Sell : Side::Buy, swept[i]);
         }
+        flow_state_ = buy_aggressor ? 1.0 : -1.0;
         return MarketEvent::make_trade(t_, seq_, symbol_, buy_aggressor ? Side::Buy : Side::Sell,
                                         Price::from_ticks(swept.back()), qty());
     }
@@ -175,6 +192,9 @@ private:
     SequenceNumber seq_ = 0;
     Timestamp t_{std::chrono::seconds(1'700'000'000)};
     double strength_;
+    double informed_;
+    double flow_state_ = 0.0;
+    double last_move_flow_ = 0.0;
     double last_move_imbalance_ = 0.0;
     bool last_move_up_ = false;
     size_t moves_ = 0;

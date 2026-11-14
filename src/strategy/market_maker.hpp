@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 
 #include "common/types.hpp"
 #include "metrics/microstructure.hpp"
@@ -33,6 +34,14 @@ struct StrategyConfig {
     //     in the direction of the heavier side, which is where a persistent
     //     imbalance has historically been argued to predict the next move.
     //     Whether that holds is an empirical question for real data.
+    // Tick handling (set tick_size = 0 to disable both):
+    //   Quotes are rounded AWAY from the mid onto the tick grid (bid down, ask up),
+    //   as real equity quotes must be, so they can coincide with book levels.
+    //   post_only additionally clamps the bid to at most best_ask - tick and the
+    //   ask to at least best_bid + tick, so a strong inventory skew can never make
+    //   a quote cross the spread and turn the maker into a taker.
+    double tick_size = 0.01;
+    bool post_only = true;
     bool use_microprice = false;
     double imbalance_skew_bps = 0.0;
     int imbalance_levels = 3;
@@ -122,6 +131,16 @@ public:
 
         double bid = ref - half_spread_dollars - inv_skew_dollars;
         double ask = ref + half_spread_dollars - inv_skew_dollars;
+        if (cfg_.tick_size > 0.0) {
+            const double tick = cfg_.tick_size;
+            if (cfg_.post_only) {
+                bid = std::min(bid, book.best_ask()->to_double() - tick);
+                ask = std::max(ask, book.best_bid()->to_double() + tick);
+            }
+            // The epsilon keeps a price that is already on the grid from rounding a tick away.
+            bid = std::floor(bid / tick + 1e-9) * tick;
+            ask = std::ceil(ask / tick - 1e-9) * tick;
+        }
         if (bid <= 0.0 || ask <= bid) return decision;  // degenerate quotes, refuse to trade
 
         double inv_ratio = (cfg_.max_inventory_for_skew > 0)

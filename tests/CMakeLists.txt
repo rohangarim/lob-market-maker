@@ -21,6 +21,7 @@ add_executable(lob_tests
     test_queue_model.cpp
     test_markout.cpp
     test_strategy_signal.cpp
+    test_sweep.cpp
 )
 
 target_link_libraries(lob_tests PRIVATE lob_core GTest::gtest GTest::gtest_main)

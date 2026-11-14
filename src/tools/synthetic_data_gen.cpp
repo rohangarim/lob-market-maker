@@ -21,12 +21,14 @@ int main(int argc, char** argv) {
     long seed = args.get_long_or("seed", 1234);
     double start_price = args.get_double_or("start-price", 190.00);
     double tick_size = args.get_double_or("tick-size", 0.01);
+    double signal = args.get_double_or("signal-strength", 0.0);
+    double informed = args.get_double_or("informed-flow", 0.0);
 
     std::cout << "Generating " << num_events << " synthetic L2 events for " << symbol_str
-              << " (seed=" << seed << ", start_price=" << start_price << ") -> " << out_path
+              << " (seed=" << seed << ", start_price=" << start_price << ", signal_strength=" << signal << ", informed_flow=" << informed << ") -> " << out_path
               << "\n";
 
-    SyntheticBookGenerator gen(static_cast<uint64_t>(seed), start_price, tick_size, Symbol(symbol_str));
+    SyntheticBookGenerator gen(static_cast<uint64_t>(seed), start_price, tick_size, Symbol(symbol_str), signal, informed);
     std::vector<MarketEvent> events;
     events.reserve(static_cast<size_t>(num_events));
     for (long i = 0; i < num_events; ++i) events.push_back(gen.next());

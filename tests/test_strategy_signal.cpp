@@ -199,6 +199,7 @@ TEST(PipelineExecution, MarketableQuoteFromSkewIsFilledAsTakerAndCounted) {
     c.strategy.volatility_spread_multiplier = 0.0;
     c.strategy.imbalance_skew_bps = 60.0;   // pushes the ask below the best bid when bid-heavy
     c.strategy.imbalance_levels = 1;
+    c.strategy.post_only = false;   // opt out so the skewed bid is allowed to cross
     c.fill_assumptions.taker_fee_per_share = 0.003;
     Pipeline p(Symbol("AAPL"), c);
     Timestamp t(std::chrono::seconds(1));
@@ -220,4 +221,192 @@ TEST(PipelineAnalytics, MarkoutAndDrawdownArePopulatedByAReplay) {
     EXPECT_GT(p.analytics().samples, 0u);
     EXPECT_GE(p.analytics().max_drawdown, 0.0);
     EXPECT_LE(p.analytics().max_abs_position, c.risk_limits.max_position);
+}
+
+// ---- tick grid and post-only ------------------------------------------------
+
+namespace {
+StrategyConfig tick_cfg() {
+    StrategyConfig c;
+    c.volatility_spread_multiplier = 0.0;
+    c.inventory_skew_bps_per_unit = 0.0;
+    c.base_half_spread_bps = 3.1;    // $0.0310 at mid 100: off the grid on purpose
+    c.tick_size = 0.01;
+    return c;
+}
+bool on_grid(Price p) { return p.ticks() % 100 == 0; }   // $0.01 == 100 internal ticks
+}  // namespace
+
+TEST(TickGrid, QuotesAreRoundedAwayFromMidOntoTheGrid) {
+    auto b = book_with(500, 500);   // mid 100.00
+    auto d = decide(tick_cfg(), b);
+    ASSERT_TRUE(d.quote_bid && d.quote_ask);
+    EXPECT_TRUE(on_grid(d.bid_price));
+    EXPECT_TRUE(on_grid(d.ask_price));
+    EXPECT_DOUBLE_EQ(d.bid_price.to_double(), 99.96);    // 99.969 rounds DOWN
+    EXPECT_DOUBLE_EQ(d.ask_price.to_double(), 100.04);   // 100.031 rounds UP
+}
+
+TEST(TickGrid, AlreadyOnGridPricesAreNotMovedAnExtraTick) {
+    auto b = book_with(500, 500);
+    StrategyConfig c = tick_cfg();
+    c.base_half_spread_bps = 5.0;    // exactly $0.05 at mid 100
+    auto d = decide(c, b);
+    EXPECT_DOUBLE_EQ(d.bid_price.to_double(), 99.95);
+    EXPECT_DOUBLE_EQ(d.ask_price.to_double(), 100.05);
+}
+
+TEST(TickGrid, ZeroTickSizeDisablesRoundingAndClamp) {
+    auto b = book_with(500, 500);
+    StrategyConfig c = tick_cfg();
+    c.tick_size = 0.0;
+    auto d = decide(c, b);
+    EXPECT_FALSE(on_grid(d.bid_price));
+    EXPECT_NEAR(d.bid_price.to_double(), 99.969, 1e-4);
+}
+
+TEST(PostOnly, HugeInventorySkewCannotPushQuotesThroughTheTouch) {
+    auto b = book_with(500, 500);            // best bid 99.95, best ask 100.05
+    StrategyConfig c = tick_cfg();
+    c.inventory_skew_bps_per_unit = 5.0;
+    c.max_inventory_for_skew = 200;
+    MicrostructureCalculator micro;
+    MarketMakerStrategy strat(c);
+    for (Quantity inv : {-150, -50, 50, 150}) {
+        auto d = strat.decide(b, micro, inv, Timestamp(std::chrono::seconds(1)));
+        if (d.quote_bid) EXPECT_LE(d.bid_price.to_double(), 100.05 - 0.01 + 1e-9) << "inv=" << inv;
+        if (d.quote_ask) EXPECT_GE(d.ask_price.to_double(), 99.95 + 0.01 - 1e-9) << "inv=" << inv;
+        if (d.quote_bid && d.quote_ask) EXPECT_LT(d.bid_price, d.ask_price) << "inv=" << inv;
+    }
+}
+
+TEST(PostOnly, WithoutItTheSameSkewDoesCross) {
+    auto b = book_with(500, 500);
+    StrategyConfig c = tick_cfg();
+    c.inventory_skew_bps_per_unit = 5.0;
+    c.post_only = false;
+    MicrostructureCalculator micro;
+    auto d = MarketMakerStrategy(c).decide(b, micro, -150, Timestamp(std::chrono::seconds(1)));
+    ASSERT_TRUE(d.quote_bid);
+    EXPECT_GE(d.bid_price.to_double(), 100.05);   // short inventory: bid pushed up through the ask
+}
+
+TEST(PostOnly, LongReplayWithAggressiveSkewNeverProducesATakerFill) {
+    PipelineConfig c;
+    c.strategy.base_half_spread_bps = 0.3;
+    c.strategy.inventory_skew_bps_per_unit = 0.5;     // the setting that used to force crossing
+    c.strategy.imbalance_skew_bps = 30.0;
+    c.risk_limits.max_daily_loss = 1e9;
+    Pipeline p(Symbol("AAPL"), c);
+    SyntheticBookGenerator g(21, 190.0, 0.01, Symbol("AAPL"), 0.9);
+    for (int i = 0; i < 400000; ++i) p.process(g.next());
+    EXPECT_GT(p.stats().fills, 100u);
+    EXPECT_EQ(p.execution().total_taker_fills(), 0u);
+}
+
+TEST(TickGrid, EveryQuoteInALongReplayLandsOnTheGrid) {
+    PipelineConfig c;
+    c.strategy.base_half_spread_bps = 2.3;
+    c.strategy.volatility_spread_multiplier = 3.0;
+    c.risk_limits.max_daily_loss = 1e9;
+    Pipeline p(Symbol("AAPL"), c);
+    SyntheticBookGenerator g(4, 190.0, 0.01, Symbol("AAPL"));
+    size_t checked = 0;
+    for (int i = 0; i < 100000; ++i) {
+        p.process(g.next());
+        for (const auto& o : p.execution().open_orders()) {
+            ASSERT_TRUE(on_grid(o.price)) << o.price.ticks();
+            ++checked;
+        }
+    }
+    EXPECT_GT(checked, 1000u);
+}
+
+TEST(InformedFlow, NextMoveFollowsTheLastTradeOnlyWhenEnabled) {
+    auto aligned = [](double informed) {
+        SyntheticBookGenerator g(31, 190.0, 0.01, Symbol("AAPL"), 0.0, informed);
+        size_t last = 0, n = 0, agree = 0;
+        for (int i = 0; i < 600000; ++i) {
+            g.next();
+            if (g.moves() != last) {
+                last = g.moves();
+                if (g.last_move_flow() != 0.0) {
+                    ++n;
+                    if ((g.last_move_flow() > 0) == g.last_move_up()) ++agree;
+                }
+            }
+        }
+        EXPECT_GT(n, 2000u);
+        return static_cast<double>(agree) / static_cast<double>(n);
+    };
+    EXPECT_NEAR(aligned(0.0), 0.5, 0.05);
+    EXPECT_GT(aligned(0.9), 0.68);
+}
+
+TEST(InformedFlow, ZeroKeepsTheStreamIdenticalToTheDefault) {
+    SyntheticBookGenerator a(8, 190.0, 0.01, Symbol("AAPL"), 0.3);
+    SyntheticBookGenerator b(8, 190.0, 0.01, Symbol("AAPL"), 0.3, 0.0);
+    for (int i = 0; i < 20000; ++i) {
+        auto x = a.next(), y = b.next();
+        ASSERT_EQ(x.type, y.type);
+        ASSERT_EQ(x.price.ticks(), y.price.ticks());
+    }
+}
+
+TEST(InformedFlow, MakerFillsAreAdverselySelectedOnlyWhenFlowIsInformed) {
+    auto markout = [](double informed) {
+        PipelineConfig c;
+        c.strategy.base_half_spread_bps = 0.5;
+        c.strategy.inventory_skew_bps_per_unit = 0.01;
+        c.risk_limits.max_daily_loss = 1e9;
+        c.markout_horizons = {std::chrono::milliseconds(50)};
+        Pipeline p(Symbol("AAPL"), c);
+        SyntheticBookGenerator g(2, 190.0, 0.01, Symbol("AAPL"), 0.0, informed);
+        for (int i = 0; i < 400000; ++i) p.process(g.next());
+        EXPECT_GT(p.markout().fill_count(), 500u);
+        return p.markout().avg_markout(0) - p.markout().avg_edge();   // negative = mid moved against us
+    };
+    double uninformed = markout(0.0);
+    double informed = markout(0.9);
+    EXPECT_LT(informed, uninformed - 0.002);
+}
+
+// ---- fill invariants (permanent version of a one-off audit) ----------------
+
+TEST(FillInvariants, EveryMakerFillIsTriggeredByATradeAtOrThroughItsPrice) {
+    struct Case { FillModel model; int64_t order_us; int64_t cancel_us; };
+    for (Case cs : {Case{FillModel::QueuePosition, 0, 0}, Case{FillModel::QueuePosition, 300, 700},
+                    Case{FillModel::TradeThrough, 0, 0}}) {
+        PipelineConfig c;
+        c.strategy.base_half_spread_bps = 0.5;
+        c.strategy.inventory_skew_bps_per_unit = 0.01;
+        c.risk_limits.max_daily_loss = 1e9;
+        c.fill_assumptions.fill_model = cs.model;
+        c.fill_assumptions.order_latency = std::chrono::microseconds(cs.order_us);
+        c.fill_assumptions.cancel_latency = std::chrono::microseconds(cs.cancel_us);
+        Pipeline p(Symbol("AAPL"), c);
+        SyntheticBookGenerator g(1234, 190.0, 0.01, Symbol("AAPL"), 0.0, 0.8);
+
+        MarketEvent cur{};
+        size_t fills = 0, violations = 0, off_grid = 0;
+        Quantity max_pos = 0;
+        p.set_fill_observer([&](const ExecutionReport& r, std::optional<double>) {
+            ++fills;
+            if (r.taker) { ++violations; return; }                       // post-only: never a taker
+            if (cur.type != EventType::Trade) { ++violations; return; }  // maker fills come from prints only
+            bool ok = r.side == Side::Buy ? cur.price <= r.fill_price : cur.price >= r.fill_price;
+            if (!ok) ++violations;
+            if (r.fill_price.ticks() % 100 != 0) ++off_grid;
+            if (r.fill_quantity <= 0) ++violations;
+        });
+        for (int i = 0; i < 250000; ++i) {
+            cur = g.next();
+            p.process(cur);
+            max_pos = std::max<Quantity>(max_pos, std::abs(p.portfolio().state().position));
+        }
+        EXPECT_GT(fills, 1000u);
+        EXPECT_EQ(violations, 0u);
+        EXPECT_EQ(off_grid, 0u);
+        EXPECT_LE(max_pos, c.risk_limits.max_position);
+    }
 }
