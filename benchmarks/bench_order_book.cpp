@@ -52,6 +52,14 @@ public:
         return asks_.begin()->first;  // lowest key = best ask
     }
 
+    // In-place walk of the top `levels` bid levels (no allocation), best first.
+    [[nodiscard]] Quantity sum_top_bids(size_t levels) const {
+        Quantity total = 0;
+        size_t n = 0;
+        for (auto it = bids_.rbegin(); it != bids_.rend() && n < levels; ++it, ++n) total += it->second;
+        return total;
+    }
+
     [[nodiscard]] std::vector<std::pair<int64_t, Quantity>> bid_depth(size_t levels) const {
         std::vector<std::pair<int64_t, Quantity>> out;
         out.reserve(levels);
@@ -144,24 +152,31 @@ static void BM_MapOrderBook_BestBidAskReads(benchmark::State& state) {
 }
 BENCHMARK(BM_MapOrderBook_BestBidAskReads);
 
-static void BM_FlatOrderBook_Depth10Reads(benchmark::State& state) {
+// Reads through the top 10 bid levels and sums their quantities: the same work on both
+// representations. (The flat book's bid_depth() returns a span, i.e. a pointer and a
+// length, so timing the call alone would not be comparable to the map's, which must
+// build a vector. Summing forces both to actually touch the levels.)
+static void BM_FlatOrderBook_Depth10Sum(benchmark::State& state) {
     auto events = make_realistic_update_stream(2'000);
     OrderBook book(Symbol("AAPL"));
     for (const auto& ev : events) book.apply(ev);
     for (auto _ : state) {
-        benchmark::DoNotOptimize(book.bid_depth(10));
+        Quantity total = 0;
+        for (const auto& lvl : book.bid_depth(10)) total += lvl.quantity;
+        benchmark::DoNotOptimize(total);
     }
 }
-BENCHMARK(BM_FlatOrderBook_Depth10Reads);
+BENCHMARK(BM_FlatOrderBook_Depth10Sum);
 
-static void BM_MapOrderBook_Depth10Reads(benchmark::State& state) {
+static void BM_MapOrderBook_Depth10Sum(benchmark::State& state) {
     auto events = make_realistic_update_stream(2'000);
     MapOrderBook book;
     for (const auto& ev : events) book.apply(ev);
     for (auto _ : state) {
-        benchmark::DoNotOptimize(book.bid_depth(10));
+        Quantity total = book.sum_top_bids(10);
+        benchmark::DoNotOptimize(total);
     }
 }
-BENCHMARK(BM_MapOrderBook_Depth10Reads);
+BENCHMARK(BM_MapOrderBook_Depth10Sum);
 
 BENCHMARK_MAIN();

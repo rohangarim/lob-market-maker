@@ -1,53 +1,49 @@
 # Architecture
 
+See the diagram and component descriptions in the top-level README. This file records ownership and the
+threading model precisely.
+
 ```
- LIVE                                              REPLAY
- Finnhub WebSocket (trade prints)                  data/*.bin (binary event log)
-        |                                                  |
-        v                                                  v
- FinnhubClient (IXWebSocket callback thread)        ReplayEngine (reads file, optional pacing)
-   JSON -> MarketEvent, parsed once                         |
-        |                                                   |
-        v                                                   |
- SpscRingBuffer<MarketEvent>  (drop + count if full)        |
-        |                                                   |
-        +---------------------> Pipeline::process <---------+
-                                     |
-                       OrderBook (single writer)
-                                     |
-                       MicrostructureCalculator
-                                     |
-                       MarketMakerStrategy -> QuoteDecision
-                                     |
-                       RiskEngine (pre-trade checks)
-                                     |
-                       PaperExecutionEngine (simulated fills)
-                                     |
-                       Portfolio (position / P&L)
-                                     |
-                       PipelineStats + LatencyStats -> end-of-run report
+ LIVE                                               REPLAY / SWEEP
+ Finnhub WS (trades)                                data/*.bin
+   | WebSocket thread (producer)                       |
+   v                                                   v
+ parse_finnhub_message -> TradeTapeAdapter        ReplayEngine / run_sweep
+   v                                                   |
+ SPSC ring<QueuedEvent>                                |
+   | consumer thread: LiveRunner                       |
+   |   recorder, queue-latency stamps, on_clock        |
+   |   StructuredLogger (own thread) <- log records    |
+   +---------------------> Pipeline::process <---------+
+                               v
+   feed integrity -> OrderBook -> Microstructure -> Strategy -> Risk -> PaperExecutionEngine -> Portfolio
+                               v
+                  MarkoutTracker, RunAnalytics, PipelineStats -> report
 ```
 
-## Threads (live mode)
+## Threads and ownership (live mode)
 
 | Thread | Owns | Notes |
 |---|---|---|
-| WebSocket I/O (IXWebSocket internal) | `FinnhubClient` state, producer side of ring buffer | Parses JSON once, pushes `MarketEvent`s. Never blocks; on a full buffer it drops and increments a counter. |
-| Main / consumer | `Pipeline` (order book, strategy, risk, execution, portfolio) | Single owner of all mutable trading state; no locks. |
+| IXWebSocket thread | `FinnhubClient` counters (atomics), `TradeTapeAdapter` + its batch buffer | Parses once, stamps and pushes `QueuedEvent`; on a full ring it drops and bumps an atomic counter. |
+| Consumer thread | `Pipeline` and all of its state, `BinaryEventRecorder`, `LiveRunnerStats` | No locks. Single owner. Calls `on_clock()` with wall time. |
+| Logger thread | the output stream, the logger's own SPSC ring consumer side | The consumer thread is that ring's single producer; formatting happens only here. |
 
-Replay mode is single-threaded: `ReplayEngine` calls `Pipeline::process` directly.
+Shared state: the event ring (release/acquire indices), the drop counter (relaxed atomic), the logger ring, and the logger's
+written/dropped counters. Nothing else crosses threads.
 
-## Data ownership
+Replay is single-threaded. A sweep runs one independent `Pipeline` per point on worker threads over a shared **immutable** event
+vector and writes results into a pre-sized vector by index, so output is identical for any thread count (tested, TSan-clean).
 
-- `MarketEvent`: trivially copyable value, copied through the ring buffer (immutable after creation).
-- `SpscRingBuffer` indices: atomics (release/acquire); each thread's cached copy of the other side's index is thread-local.
-- `Pipeline` and everything it contains: single-owner, not thread-safe by design.
-- `FinnhubClient` counters (`messages_received`, `reconnect_count`, ...): atomics read from the main thread.
-- The `TradeTapeAdapter` (tick-rule and synthetic-overlay state) is only touched from the WebSocket thread.
+## Time
 
-## Feed-integrity handling
+Two clocks are in play and must not be mixed up. *Event time* (feed timestamps) drives every decision that must replay
+deterministically: staleness resync, order and cancel latency, markout horizons. *Wall-clock time* is used only for
+measuring latency (queue and stage timers, `steady_clock`) and for `on_clock()` in live mode, whose argument must share an epoch
+with event timestamps (it does: both are Unix-epoch nanoseconds).
 
-Handled inside `Pipeline` (see README for the policy): duplicate/out-of-order events are dropped, sequence
-gaps and large event-time gaps cancel quotes and clear the book, a crossed book suppresses quoting, and the
-live loop calls `on_clock(now)` so a silent feed also cancels quotes. The live Finnhub path is
-`parse_finnhub_message` -> `TradeTapeAdapter` -> ring buffer; both are pure and unit-tested without a network.
+## Feed integrity
+
+Duplicate/out-of-order events are dropped; a sequence gap or a large event-time gap cancels quotes, clears the book and resets
+volatility history; a crossed book cancels quotes and blocks new ones; a silent feed (`on_clock`) cancels quotes and makes the
+risk engine reject new orders until the next event.
