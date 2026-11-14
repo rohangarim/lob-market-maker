@@ -22,6 +22,7 @@
 #include "common/pipeline.hpp"
 #include "config/pipeline_config_json.hpp"
 #include "concurrency/spsc_ring_buffer.hpp"
+#include "live/live_runner.hpp"
 #include "replay/event_codec.hpp"
 #include "replay/replay_engine.hpp"
 
@@ -186,48 +187,60 @@ int run_live(const CliArgs& args, const json& cfg, const std::string& symbol) {
     double synthetic_spread = args.get_double_or("synthetic-spread", 0.02);
 
     Pipeline pipeline(Symbol(symbol), make_config(args, cfg));
-
-    // Bounded SPSC ring buffer between the WebSocket I/O thread (producer,
-    // driven by IXWebSocket's own callback thread) and this consumer loop
-    // (single owner of the Pipeline/order book).
-    SpscRingBuffer<MarketEvent, 1 << 16> ring;
+    EventRing ring;
     std::atomic<size_t> dropped{0};
 
+    // Producer: the WebSocket thread. Consumer (this thread): LiveRunner.
     FinnhubClient client(api_key, symbol, synthetic_spread, [&](const MarketEvent& ev) {
-        if (!ring.push(ev)) dropped.fetch_add(1, std::memory_order_relaxed);
+        if (!enqueue(ring, ev)) dropped.fetch_add(1, std::memory_order_relaxed);
     });
 
-    std::cout << "Starting live Finnhub feed for " << symbol << " (Ctrl+C to stop early, "
-              << "or waits " << duration_sec << "s)...\n";
+    std::unique_ptr<BinaryEventRecorder> recorder;
+    if (auto path = args.get("record")) {
+        recorder = std::make_unique<BinaryEventRecorder>(*path);
+        std::cout << "Recording received events to " << *path << " (replayable with --mode replay)\n";
+    }
+    std::ofstream log_file;
+    std::unique_ptr<StructuredLogger> logger;
+    if (auto path = args.get("log-json")) {
+        log_file.open(*path, std::ios::trunc);
+        logger = std::make_unique<StructuredLogger>(log_file);
+        logger->start();
+        std::cout << "Structured JSON logs -> " << *path << "\n";
+    }
+
+    LiveRunner runner(pipeline, ring);
+    runner.set_drop_counter(&dropped);
+    runner.set_recorder(recorder.get());
+    runner.set_logger(logger.get());
+    runner.set_clock([] { return now_ns(); });
+
+    std::cout << "Starting live Finnhub feed for " << symbol << " (Ctrl+C to stop early, or waits "
+              << duration_sec << "s)...\n";
     std::cout << "NOTE: Finnhub's free tier streams trade prints only; top-of-book quotes are "
-                 "synthesized around each trade (see marketdata/finnhub_client.hpp).\n";
+                 "synthesized around each trade (see marketdata/trade_tape_adapter.hpp).\n";
 
     std::signal(SIGINT, handle_sigint);
+    std::atomic<bool> stop{false};
     client.start();
 
+    std::thread consumer([&] { runner.run(stop); });
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(duration_sec);
-    auto last_report = std::chrono::steady_clock::now();
     while (!g_stop.load() && std::chrono::steady_clock::now() < deadline) {
-        while (auto ev = ring.pop()) {
-            pipeline.process(*ev);
-        }
-        pipeline.on_clock(now_ns());
-        if (std::chrono::steady_clock::now() - last_report > std::chrono::seconds(2)) {
-            std::cout << "\r  connected=" << client.connected()
-                      << " msgs=" << client.messages_received()
-                      << " processed=" << pipeline.stats().events_processed
-                      << " dropped=" << dropped.load()
-                      << " reconnects=" << client.reconnect_count()
-                      << " position=" << pipeline.portfolio().state().position
-                      << " pnl=" << pipeline.portfolio().state().total_pnl << std::flush;
-            last_report = std::chrono::steady_clock::now();
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        std::cout << "  connected=" << client.connected() << " msgs=" << client.messages_received()
+                  << " malformed=" << client.malformed_messages() << " dropped=" << dropped.load()
+                  << " reconnects=" << client.reconnect_count() << "\n";
     }
-    std::cout << "\n";
-    client.stop();
-    while (auto ev = ring.pop()) pipeline.process(*ev);  // drain remaining
+    client.stop();                 // producer is quiet from here on
+    stop.store(true, std::memory_order_release);
+    consumer.join();
+    if (logger) logger->stop();
 
+    const auto& q = runner.stats().queue_latency;
+    std::cout << "\nqueue latency (enqueue -> dequeue, n=" << q.count() << "): p50 "
+              << q.percentile(50) / 1000.0 << " us, p99 " << q.percentile(99) / 1000.0 << " us, max "
+              << q.max_ns() / 1000.0 << " us\n";
     print_report(pipeline, "LIVE", dropped.load());
     maybe_write_json(args, report_json(pipeline, "live", dropped.load()));
     return 0;

@@ -7,18 +7,11 @@
 #include <unistd.h>
 
 #include "replay/event_codec.hpp"
+#include "test_util.hpp"
 
 using namespace lob;
 
-namespace {
-// mkstemp-based temp file path, avoiding the deprecated/unsafe tmpnam().
-std::string unique_temp_path() {
-    std::string tmpl = "/tmp/lob_event_codec_test_XXXXXX";
-    int fd = mkstemp(tmpl.data());
-    if (fd != -1) close(fd);
-    return tmpl;
-}
-}  // namespace
+using lob_test::unique_temp_path;
 
 TEST(EventCodec, RoundTripSingleEventThroughStream) {
     MarketEvent original = MarketEvent::make_quote(Timestamp(123456789), 42, Symbol("AAPL"),
