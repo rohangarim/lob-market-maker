@@ -47,6 +47,7 @@ inline PipelineConfig build_pipeline_config(const nlohmann::json& cfg) {
         if (s.contains("requote_threshold_bps")) pcfg.strategy.requote_threshold_bps = s["requote_threshold_bps"].get<double>();
         if (s.contains("volatility_spread_multiplier")) pcfg.strategy.volatility_spread_multiplier = s["volatility_spread_multiplier"].get<double>();
     }
+    if (cfg.contains("latency_sample_interval")) pcfg.latency_sample_interval = cfg["latency_sample_interval"].get<uint32_t>();
     if (cfg.contains("execution")) {
         auto& e = cfg["execution"];
         auto& f = pcfg.fill_assumptions;

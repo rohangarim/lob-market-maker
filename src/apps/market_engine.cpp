@@ -86,6 +86,7 @@ json report_json(const Pipeline& pipeline, const char* mode_label, size_t ring_d
             {"realized_pnl", pnl.realized_pnl},
             {"unrealized_pnl", pnl.unrealized_pnl},
             {"total_pnl", pnl.total_pnl},
+            {"latency_sample_interval", pipeline.latency_sample_interval()},
             {"decision_latency", latency_json(st.decision_latency)},
             {"book_update_latency", latency_json(st.book_update_latency)},
             {"execution_latency", latency_json(st.execution_latency)}};
@@ -110,6 +111,7 @@ void print_report(const Pipeline& pipeline, const char* mode_label, size_t ring_
     std::cout << "risk rejects:         " << stats.risk_rejects << "\n";
     std::cout << "open orders:          " << exec.open_order_count() << "\n";
     std::cout << "-- latency (histogram buckets, lower bound) --\n";
+    std::cout << "  (decision latency sampled every " << pipeline.latency_sample_interval() << " requotes)\n";
     print_latency("decision (strategy->risk->order)", stats.decision_latency);
     print_latency("book update + microstructure", stats.book_update_latency);
     print_latency("execution + mark-to-market", stats.execution_latency);
@@ -126,6 +128,7 @@ void print_report(const Pipeline& pipeline, const char* mode_label, size_t ring_
 PipelineConfig make_config(const CliArgs& args, const json& cfg) {
     PipelineConfig pcfg = build_pipeline_config(cfg);
     pcfg.profile_stages = args.has("profile-stages");
+    if (args.has("latency-sample")) pcfg.latency_sample_interval = static_cast<uint32_t>(args.get_long_or("latency-sample", 16));
     return pcfg;
 }
 

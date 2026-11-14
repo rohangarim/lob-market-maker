@@ -4,6 +4,7 @@
 #include <cmath>
 #include <deque>
 #include <optional>
+#include <vector>
 
 #include "common/types.hpp"
 #include "orderbook/order_book.hpp"
@@ -45,11 +46,7 @@ public:
     void on_book_update(const OrderBook& book, Timestamp ts) {
         auto mid = book.mid_price();
         if (!mid) return;
-        if (last_mid_) {
-            double log_ret = std::log(*mid / *last_mid_);
-            returns_.push_back(log_ret);
-            if (returns_.size() > volatility_window_) returns_.pop_front();
-        }
+        if (last_mid_) push_return(std::log(*mid / *last_mid_));
         last_mid_ = mid;
         (void)ts;
     }
@@ -58,7 +55,10 @@ public:
     // gap is not counted as a volatility sample).
     void reset_price_history() {
         last_mid_.reset();
-        returns_.clear();
+        ret_count_ = 0;
+        ret_head_ = 0;
+        ret_sum_ = ret_sumsq_ = 0.0;
+        pushes_since_recompute_ = 0;
     }
 
     void on_trade(Quantity qty, Timestamp ts) {
@@ -106,15 +106,13 @@ public:
         return static_cast<double>(bid_vol - ask_vol) / denom;
     }
 
+    // Sample standard deviation (n-1) of the last `volatility_window` log returns,
+    // O(1) per call from running sums (see push_return for the drift control).
     [[nodiscard]] std::optional<double> short_term_volatility() const noexcept {
-        if (returns_.size() < 2) return std::nullopt;
-        double mean = 0.0;
-        for (double r : returns_) mean += r;
-        mean /= static_cast<double>(returns_.size());
-        double var = 0.0;
-        for (double r : returns_) var += (r - mean) * (r - mean);
-        var /= static_cast<double>(returns_.size() - 1);
-        return std::sqrt(var);
+        if (ret_count_ < 2) return std::nullopt;
+        const double n = static_cast<double>(ret_count_);
+        const double var = (ret_sumsq_ - ret_sum_ * ret_sum_ / n) / (n - 1.0);
+        return std::sqrt(var > 0.0 ? var : 0.0);
     }
 
     [[nodiscard]] Quantity rolling_trade_volume() const noexcept {
@@ -133,6 +131,34 @@ public:
     }
 
 private:
+    // Running sum / sum of squares over a fixed ring. Subtracting evicted values
+    // accumulates floating-point error, so every kRecomputeEvery pushes both sums
+    // are rebuilt exactly from the ring contents (cost amortized to ~nothing).
+    void push_return(double r) {
+        if (ret_ring_.size() != volatility_window_) ret_ring_.assign(volatility_window_, 0.0);
+        if (ret_count_ == volatility_window_) {
+            const double old = ret_ring_[ret_head_];
+            ret_sum_ -= old;
+            ret_sumsq_ -= old * old;
+        } else {
+            ++ret_count_;
+        }
+        ret_ring_[ret_head_] = r;
+        ret_sum_ += r;
+        ret_sumsq_ += r * r;
+        ret_head_ = (ret_head_ + 1) % volatility_window_;
+        if (++pushes_since_recompute_ >= kRecomputeEvery) {
+            pushes_since_recompute_ = 0;
+            ret_sum_ = ret_sumsq_ = 0.0;
+            for (size_t i = 0; i < ret_count_; ++i) {
+                ret_sum_ += ret_ring_[i];
+                ret_sumsq_ += ret_ring_[i] * ret_ring_[i];
+            }
+        }
+    }
+
+    static constexpr size_t kRecomputeEvery = 4096;
+
     struct TradeSample {
         Quantity quantity;
         Timestamp timestamp;
@@ -141,7 +167,12 @@ private:
     size_t volatility_window_;
     size_t trade_window_;
     std::optional<double> last_mid_;
-    std::deque<double> returns_;
+    std::vector<double> ret_ring_;
+    size_t ret_count_ = 0;
+    size_t ret_head_ = 0;
+    double ret_sum_ = 0.0;
+    double ret_sumsq_ = 0.0;
+    size_t pushes_since_recompute_ = 0;
     std::deque<TradeSample> trades_;
 };
 

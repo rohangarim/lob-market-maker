@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <functional>
 #include <optional>
@@ -23,6 +24,11 @@ struct PipelineConfig {
     // Opt-in: time the book-update and execution stages of every event. Costs
     // a few extra clock reads per event, so it is off by default.
     bool profile_stages = false;
+    // Decision latency is recorded for every Nth requote (1 = every one). Reading the
+    // clock twice per requote was measured to cost about as much as the work being timed,
+    // so the default samples; the percentiles are an unbiased sample of the same
+    // distribution because the sampling is a fixed stride, not data-dependent.
+    uint32_t latency_sample_interval = 16;
     // Event-time horizons at which fills are marked to the mid (adverse selection).
     std::vector<Timestamp> markout_horizons = {
         std::chrono::milliseconds(1), std::chrono::milliseconds(10),
@@ -78,6 +84,7 @@ public:
           stale_threshold_(std::chrono::duration_cast<Timestamp>(
               std::chrono::duration<double>(cfg.strategy.max_staleness_sec))),
           requote_threshold_bps_(cfg.strategy.requote_threshold_bps),
+          sample_interval_(std::max<uint32_t>(1, cfg.latency_sample_interval)),
           profile_stages_(cfg.profile_stages),
           markout_(cfg.markout_horizons) {}
 
@@ -154,6 +161,7 @@ public:
     [[nodiscard]] const PaperExecutionEngine& execution() const noexcept { return exec_; }
     [[nodiscard]] const MicrostructureCalculator& microstructure() const noexcept { return micro_; }
     [[nodiscard]] bool market_data_stale() const noexcept { return market_data_stale_; }
+    [[nodiscard]] uint32_t latency_sample_interval() const noexcept { return sample_interval_; }
     [[nodiscard]] const MarkoutTracker& markout() const noexcept { return markout_; }
     [[nodiscard]] const RunAnalytics& analytics() const noexcept { return analytics_; }
 
@@ -200,7 +208,9 @@ private:
     }
 
     void requote(Timestamp now) {
-        auto t0 = std::chrono::steady_clock::now();
+        const bool timed = (++requotes_ % sample_interval_) == 0;
+        std::chrono::steady_clock::time_point t0;
+        if (timed) t0 = std::chrono::steady_clock::now();
 
         QuoteDecision qd = strategy_.decide(book_, micro_, portfolio_.state().position, now);
         double reference_price = book_.mid_price().value_or(0.0);
@@ -219,9 +229,11 @@ private:
             submit(Side::Sell, qd.ask_price, qd.ask_size, reference_price, now, resting_ask_);
         }
 
-        auto t1 = std::chrono::steady_clock::now();
-        stats_.decision_latency.add_ns(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+        if (timed) {
+            auto t1 = std::chrono::steady_clock::now();
+            stats_.decision_latency.add_ns(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+        }
     }
 
     static bool needs_replace(const std::optional<RestingQuote>& resting, Price target, Quantity size,
@@ -256,6 +268,8 @@ private:
 
     Timestamp stale_threshold_;
     double requote_threshold_bps_;
+    uint32_t sample_interval_;
+    uint32_t requotes_ = 0;
     bool profile_stages_;
     bool market_data_stale_ = false;
     OrderId next_order_id_ = 1;
